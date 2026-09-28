@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Заказ</h1>
+{% if not can_order %}
+  <div class="card">
+    <button disabled>Собрать заказ</button>
+    <p class="warn">Сначала свяжите товары.</p>
+  </div>
+{% elif line_total == 0 %}
+  <div class="card"><p>Связки есть, но в заказ пока нечего поставить: нет цены с той же единицей или все поставщики отмечены «нет в наличии».</p></div>
+{% else %}
+  <div class="card">
+    <p>Показано {{ lines|length }} из {{ line_total }}. В списке только связанные товары. Подтверждённая строка не перескакивает на другой прайс.</p>
+    <form method="post"><button name="action" value="export">Собрать файлы заказов</button></form>
+  </div>
+  {% for line in lines %}
+  <div class="card">
+    <p><b>{{ line.name }}</b></p>
+    <p>{{ line.supplier }} — {{ line.price }} ({{ line.price_type }})</p>
+    <p class="muted">У поставщика: {{ line.supplier_name }}</p>
+    {% if line.next_supplier %}<p class="muted">Следующий по цене: {{ line.next_supplier }} — {{ line.next_price }}</p>{% endif %}
+    {% if line.confirmed %}<p>Подтверждено на сегодня.</p>{% endif %}
+    <form method="post">
+      <input type="hidden" name="code" value="{{ line.code }}">
+      <input type="hidden" name="supplier" value="{{ line.supplier }}">
+      <button name="action" value="confirm">Подтвердить</button>
+      <button class="secondary" name="action" value="absent">Нет в наличии</button>
+    </form>
+  </div>
+  {% endfor %}
+{% endif %}
+{% if blocked %}
+<div class="card">
+  <h2>Не сравниваем</h2>
+  {% for row in blocked %}
+    <p class="warn">{{ row.name }} — {{ row.supplier }}: {{ row.problem }}</p>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

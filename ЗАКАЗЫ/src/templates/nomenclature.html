@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Номенклатура</h1>
+<div class="card">
+  <p>Слева ваш товар из 1С. Справа название поставщика. Одна сайра может называться у пяти поставщиков по-разному: свяжите каждый вариант один раз.</p>
+  <form method="post" enctype="multipart/form-data">
+    <input type="hidden" name="action" value="upload">
+    <p>Файл Excel из 1С: код, штрихкод, наименование, единица.</p>
+    <input type="file" name="catalog" accept=".xls,.xlsx">
+    <button type="submit">Загрузить справочник</button>
+  </form>
+  {% if catalog_total == 0 %}
+    <p class="warn">Справочник пуст. Пока слева нечего выбирать.</p>
+  {% endif %}
+</div>
+
+{% if review %}
+<div class="card">
+  <h2>Связано по штрихкоду, проверьте</h2>
+  <p class="muted">Показано {{ review|length }} из {{ review_total }}.</p>
+  <table>
+    {% for row in review %}
+    <tr>
+      <td>{{ row["Наименование"] }}<br><span class="muted">{{ row["Поставщик"] }}</span>
+        {% if row.problem %}<br><span class="warn">{{ row.problem }}</span>{% endif %}
+      </td>
+      <td>
+        <form method="post">
+          <input type="hidden" name="offer_key" value="{{ row.key }}">
+          <button name="action" value="accept">Верно</button>
+          <button class="secondary" name="action" value="reject">Это не тот товар</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<form method="post">
+  <input type="hidden" name="action" value="link">
+  <input type="hidden" name="q" value="{{ q }}">
+  <input type="hidden" name="supplier_q" value="{{ supplier_q }}">
+  <div class="columns">
+    <div class="card">
+      <h2>Ваш товар</h2>
+      <p class="muted">В справочнике {{ catalog_total }}. Показаны первые совпадения. Искать — внизу страницы.</p>
+      {% for item in catalog %}
+        <label><input type="radio" name="catalog_code" value="{{ item.code }}"> {{ item.name }} <span class="muted">{{ item.code }}</span></label><br>
+      {% endfor %}
+    </div>
+    <div class="card">
+      <h2>Название у поставщика</h2>
+      <p class="muted">Без связки: {{ unmatched_total }}. Показаны первые 40.</p>
+      {% for row in unmatched %}
+        <label><input type="radio" name="offer_key" value="{{ row.key }}"> {{ row["Наименование"] }} <span class="muted">{{ row["Поставщик"] }}</span></label><br>
+      {% endfor %}
+    </div>
+  </div>
+  <p><button type="submit">Связать</button></p>
+</form>
+<form method="get" action="/nomenclature">
+  <p>
+    <input type="text" name="q" value="{{ q }}" placeholder="Ваш товар">
+    <input type="text" name="supplier_q" value="{{ supplier_q }}" placeholder="Название или поставщик">
+    <button type="submit">Найти</button>
+  </p>
+</form>
+{% endblock %}

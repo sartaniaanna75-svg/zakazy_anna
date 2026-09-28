@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Прайсы</h1>
+<div class="card">
+  <p>Кнопка читает файлы из папки inbox и из «Прайсы» на рабочем столе. Повтор того же файла второй раз не записывается.</p>
+  <form method="post">
+    <button type="submit">Разобрать папку</button>
+  </form>
+</div>
+<div class="card">
+  {% if notes %}
+    {% for note in notes %}
+      <p>{{ note }}</p>
+    {% endfor %}
+  {% else %}
+    <p class="muted">Пока пусто. Нажмите «Разобрать папку».</p>
+  {% endif %}
+</div>
+{% endblock %}
