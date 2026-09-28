@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PRICES = ROOT / "data" / "prices.json"
 XLSX_LIB = ROOT / "out" / "xlsx.full.min.js"
 TARGETS = [
+    ROOT / "zakazy.html",
     Path(r"C:\Users\1\Desktop\zakazy.html"),
     ROOT / "out" / "zakazy.html",
 ]
@@ -23,18 +24,29 @@ PAGE = r"""<!DOCTYPE html>
   header { background: #16324f; color: white; padding: 16px 24px; }
   nav button { background: transparent; color: white; border: 0; font-size: 18px; margin-right: 18px; cursor: pointer; }
   nav button.active { text-decoration: underline; }
-  main { padding: 24px; max-width: 1100px; }
+  main { padding: 24px; max-width: 1200px; }
   .card { background: white; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
   button.action { background: #16324f; color: white; border: 0; border-radius: 8px; padding: 10px 16px; font-size: 16px; cursor: pointer; }
   button.secondary { background: #6b7280; }
+  button.quiet { background: transparent; color: #16324f; border: 0; text-decoration: underline; cursor: pointer; font-size: 16px; padding: 0; }
+  button.filter { background: #e5e7eb; color: #1c2430; border: 0; border-radius: 8px; padding: 8px 12px; margin-right: 8px; cursor: pointer; }
+  button.filter.active { background: #16324f; color: white; }
   button:disabled { background: #b9c0c8; cursor: not-allowed; }
-  input[type="text"] { font-size: 16px; padding: 8px; width: 280px; }
+  input[type="text"], select { font-size: 16px; padding: 8px; }
   table { width: 100%; border-collapse: collapse; }
   td, th { text-align: left; padding: 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+  tr.need { background: #fff7ed; }
+  tr.done { background: #f0fdf4; }
   .warn { color: #9a3412; }
   .ok { color: #166534; }
   .muted { color: #4b5563; }
   .hidden { display: none; }
+  #picker-list { max-height: 320px; overflow: auto; }
+  #match-search { width: 360px; }
+  button.no { margin-left: 8px; padding: 6px 12px; }
+  input.row-search { width: 100%; box-sizing: border-box; }
+  #inline-drop { position: fixed; z-index: 30; background: white; border: 1px solid #d1d5db; border-radius: 8px; max-height: 240px; overflow: auto; box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 8px 10px; }
+  #inline-drop button { display: block; width: 100%; text-align: left; margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -81,18 +93,31 @@ PAGE = r"""<!DOCTYPE html>
   </section>
   <section id="match" class="hidden">
     <h1>Номенклатура</h1>
-    <div class="card" id="auto-box"></div>
     <div class="card">
-      <h2>Проверьте, похоже на ваш товар</h2>
-      <div id="suggest-box"></div>
+      <p>В колонке «Наша номенклатура» наберите часть названия прямо в строке, например «чайка». Под полем откроется список ваших товаров. Нажмите нужный, затем «Да».</p>
+      <p>
+        <select id="match-supplier"></select>
+        <input id="match-search" type="text" placeholder="Найти в прайсе этого поставщика">
+      </p>
+      <p id="match-filters"></p>
+      <p id="match-counts" class="muted"></p>
     </div>
     <div class="card">
-      <h2>Не связалось</h2>
-      <p class="warn">Для этих строк программа не нашла ваш товар. Их можно связать вручную.</p>
-      <p><input id="miss-search" type="text" placeholder="Найти среди несвязанных"> Ваш товар
-      <select id="manual-catalog"></select></p>
-      <div id="miss-box"></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Номенклатура поставщика</th>
+            <th>Поставщик</th>
+            <th>Наша номенклатура</th>
+            <th>Статус</th>
+            <th>Подтверждение</th>
+          </tr>
+        </thead>
+        <tbody id="match-body"></tbody>
+      </table>
+      <p><button id="match-more" class="secondary" type="button">Показать ещё</button></p>
     </div>
+    <div id="inline-drop" class="hidden"></div>
   </section>
   <section id="order" class="hidden">
     <h1>Заказ</h1>
@@ -111,13 +136,32 @@ state.skip = state.skip || {};
 state.absent = state.absent || {};
 state.confirmed = state.confirmed || {};
 state.templates = state.templates || {};
+state.verified = state.verified || {};
+state.draft = state.draft || {};
+state.supplierPick = state.supplierPick || "";
 let pending = null;
-let suggestions = [];
-let unmatched = [];
+let judged = [];
+let judgedByKey = new Map();
+let wordIndex = new Map();
+const STOP = new Set("для или при под без шт штук упак упаковка набор все это про над".split(" "));
+let matchFilter = "all";
+let matchShown = 40;
+const HUMAN = {вручную: 1, проверка: 1, подтверждено: 1};
+if (!state.migratedV3) {
+  Object.keys(state.links).forEach(key => {
+    if (HUMAN[state.methods[key]]) state.verified[key] = true;
+    else {
+      delete state.links[key];
+      delete state.methods[key];
+    }
+  });
+  state.migratedV3 = true;
+}
 function save() {
   localStorage.setItem(KEY, JSON.stringify({
     catalog: state.catalog, links: state.links, methods: state.methods,
-    skip: state.skip, absent: state.absent, confirmed: state.confirmed, templates: state.templates
+    skip: state.skip, absent: state.absent, confirmed: state.confirmed, templates: state.templates,
+    verified: state.verified, draft: state.draft, migratedV3: state.migratedV3, supplierPick: state.supplierPick || ""
   }));
 }
 function today() {
@@ -160,61 +204,135 @@ function score(left, right) {
   a.forEach(token => { if (b.has(token)) hit += 1; });
   return hit / Math.max(a.size, b.size);
 }
+function sharedRare(left, right) {
+  const other = new Set(tokens(right));
+  const found = [];
+  tokens(left).forEach(token => {
+    if (token.length < 4 || STOP.has(token) || /^\d/.test(token) || !other.has(token)) return;
+    const list = wordIndex.get(token) || [];
+    if (list.length > 0 && list.length <= 150) found.push(token);
+  });
+  found.sort((a, b) => (wordIndex.get(a) || []).length - (wordIndex.get(b) || []).length);
+  return found;
+}
+function seedWord(name) {
+  const words = tokens(name).filter(token => token.length >= 4 && !STOP.has(token) && !/^\d/.test(token));
+  words.sort((a, b) => {
+    const as = (wordIndex.get(a) || []).length || 9999;
+    const bs = (wordIndex.get(b) || []).length || 9999;
+    return as - bs || b.length - a.length;
+  });
+  return words[0] || "";
+}
+function numberList(value) {
+  return (String(value || "").match(/\d+(?:[.,]\d+)?/g) || []).map(part => part.replace(",", "."));
+}
+function sameNumbers(left, right) {
+  const a = numberList(left).sort().join("|");
+  const b = numberList(right).sort().join("|");
+  return Boolean(a) && a === b;
+}
+function numbersDiffer(left, right) {
+  const a = numberList(left).sort().join("|");
+  const b = numberList(right).sort().join("|");
+  return Boolean(a) && Boolean(b) && a !== b;
+}
+function catalogByCode(code) {
+  return state.catalog.find(item => item.code === code) || null;
+}
+function tally(list) {
+  const counts = {sure: 0, doubt: 0, none: 0, confirmed: 0, picked: 0};
+  list.forEach(item => { counts[item.status] = (counts[item.status] || 0) + 1; });
+  return counts;
+}
 function analyze() {
-  suggestions = [];
-  unmatched = [];
+  judged = [];
+  judgedByKey = new Map();
   const byBarcode = new Map();
   const byName = new Map();
   const index = new Map();
   state.catalog.forEach((item, indexItem) => {
     if (item.barcode) byBarcode.set(item.barcode, indexItem);
     const name = norm(item.name);
-    if (name) byName.set(name, indexItem);
+    if (name && !byName.has(name)) byName.set(name, indexItem);
     tokens(item.name).forEach(token => {
       const list = index.get(token) || [];
-      if (list.length < 40) list.push(indexItem);
+      const limit = token.length >= 5 ? 150 : 40;
+      if (list.length < limit) list.push(indexItem);
       index.set(token, list);
     });
   });
-  let auto = 0;
+  wordIndex = index;
+  function push(item) {
+    judged.push(item);
+    judgedByKey.set(item.key, item);
+  }
   uniqueOffers().forEach(row => {
     const key = offerKey(row);
-    if (state.links[key]) return;
+    if (state.verified[key] && state.links[key]) {
+      push({key, status: "confirmed", code: state.links[key], reason: ""});
+      return;
+    }
+    if (state.draft[key]) {
+      push({key, status: "picked", code: state.draft[key], reason: "вы выбрали, осталось подтвердить"});
+      return;
+    }
     const code = barcode(row[3]);
-    const exact = byName.get(norm(row[1]));
-    let hit = code && byBarcode.has(code) ? byBarcode.get(code) : null;
-    let method = hit == null ? "" : "штрихкод";
-    if (hit == null && exact != null) { hit = exact; method = "точное название"; }
+    let hit = null;
+    let method = "";
+    if (code && byBarcode.has(code)) {
+      const indexItem = byBarcode.get(code);
+      const item = state.catalog[indexItem];
+      if (!state.skip[key + "\n" + item.code]) { hit = indexItem; method = "штрихкод"; }
+    }
+    if (hit == null) {
+      const exact = byName.get(norm(row[1]));
+      if (exact != null) {
+        const item = state.catalog[exact];
+        if (!state.skip[key + "\n" + item.code]) { hit = exact; method = "точное название"; }
+      }
+    }
     if (hit != null) {
       const item = state.catalog[hit];
       const problem = unitProblem(item.unit, row[4]);
-      const pair = key + "\n" + item.code;
-      if (state.skip[pair]) { unmatched.push(key); return; }
-      if (problem === "единица не совпала") suggestions.push({key, catalogIndex: hit, reason: method + ", " + problem});
-      else { state.links[key] = item.code; state.methods[key] = method; auto += 1; }
+      if (problem === "единица не совпала") push({key, status: "doubt", code: item.code, reason: method + ", единица не совпала"});
+      else push({key, status: "sure", code: item.code, reason: method});
       return;
     }
     const candidates = new Map();
     tokens(row[1]).forEach(token => (index.get(token) || []).forEach(indexItem => candidates.set(indexItem, 1)));
-    let best = -1, bestScore = 0, second = 0;
+    let best = -1, bestScore = 0, second = 0, bestRare = [];
     candidates.forEach((_, indexItem) => {
       const item = state.catalog[indexItem];
       if (state.skip[key + "\n" + item.code]) return;
       const value = score(row[1], item.name);
-      if (value > bestScore) { second = bestScore; bestScore = value; best = indexItem; }
+      const rare = sharedRare(row[1], item.name);
+      const rank = rare.length * 10 + value;
+      const bestRank = best < 0 ? -1 : bestRare.length * 10 + bestScore;
+      if (rank > bestRank) { second = bestScore; bestScore = value; best = indexItem; bestRare = rare; }
       else if (value > second) second = value;
     });
-    if (best >= 0 && bestScore >= 0.5 && bestScore - second >= 0.1) suggestions.push({key, catalogIndex: best, reason: "похожее название"});
-    else unmatched.push(key);
+    const rareHit = bestRare.length > 0;
+    if (best < 0 || (!rareHit && bestScore < 0.45)) { push({key, status: "none", code: "", reason: ""}); return; }
+    const item = state.catalog[best];
+    const problem = unitProblem(item.unit, row[4]);
+    const tight = bestScore - second >= 0.1;
+    if (problem === "единица не совпала") { push({key, status: "doubt", code: item.code, reason: rareHit ? "похожее слово: " + bestRare[0] + ", единица не совпала" : "единица не совпала"}); return; }
+    if (!rareHit && sameNumbers(row[1], item.name) && bestScore >= 0.85 && tight) {
+      push({key, status: "sure", code: item.code, reason: "название и объём совпали"});
+      return;
+    }
+    const reason = rareHit ? "похожее слово: " + bestRare[0] : (!tight ? "несколько похожих" : (numbersDiffer(row[1], item.name) ? "цифры в названии различаются" : "похожее название"));
+    push({key, status: "doubt", code: item.code, reason});
   });
-  save();
-  return auto;
 }
-function reportText(auto) {
+function reportText() {
   if (!state.catalog.length) return "Сначала загрузите наш прайс.";
-  return "Связано автоматически: " + Object.keys(state.links).length
-    + ". Сомнения, нужно проверить: " + suggestions.length
-    + ". Не связалось: " + unmatched.length + ".";
+  const counts = tally(judged);
+  return "Совпало, проверьте: " + ((counts.sure || 0) + (counts.picked || 0))
+    + ". Сомнение: " + (counts.doubt || 0)
+    + ". Не сопоставлено: " + (counts.none || 0)
+    + ". Подтверждено: " + (counts.confirmed || 0) + ".";
 }
 function show(tab) {
   document.querySelectorAll("main section").forEach(node => node.classList.add("hidden"));
@@ -227,13 +345,20 @@ function show(tab) {
 }
 document.querySelectorAll("nav button").forEach(button => button.addEventListener("click", () => show(button.dataset.tab)));
 function renderToday() {
-  const offers = uniqueOffers();
+  const counts = tally(judged);
+  const check = (counts.sure || 0) + (counts.picked || 0);
+  const confirmed = counts.confirmed || 0;
   document.getElementById("today-stats").innerHTML = "<p>Строк цен: <b>" + rows.length + "</b>. Ваших товаров: <b>" + state.catalog.length + "</b>.</p>"
-    + "<p>Связано: <b>" + Object.keys(state.links).length + "</b> из " + offers.size + ".</p>"
-    + (Object.keys(state.links).length ? "<p><button class='action' id='go-order' type='button'>Собрать заказ</button></p>" : "<p><button class='action' disabled>Собрать заказ</button></p><p class='warn'>Сначала свяжите товары.</p>");
+    + "<p>Совпало, проверьте: <b>" + check + "</b>.</p>"
+    + "<p>Сомнение: <b>" + (counts.doubt || 0) + "</b>.</p>"
+    + "<p>Не сопоставлено: <b>" + (counts.none || 0) + "</b>.</p>"
+    + "<p>Подтверждено галочкой: <b>" + confirmed + "</b>.</p>"
+    + "<p><button class='action' id='go-match' type='button'>Открыть сверку</button> "
+    + (confirmed ? "<button class='action' id='go-order' type='button'>Собрать заказ</button></p>" : "<button class='action' disabled>Собрать заказ</button></p><p class='warn'>В заказ попадают только строки, где вы поставили галочку.</p>");
+  const openMatch = document.getElementById("go-match");
+  if (openMatch) openMatch.addEventListener("click", () => show("match"));
   const go = document.getElementById("go-order");
   if (go) go.addEventListener("click", () => show("order"));
-  document.getElementById("report").textContent = reportText(0);
 }
 function cell(value) { return String(value == null ? "" : value).trim(); }
 function findHeader(grid) {
@@ -334,12 +459,84 @@ function guessHeader(grid) {
 function guessMap(labels) {
   const low = labels.map(item => cell(item).toLowerCase());
   return {
-    name: column(low, ["наименование", "номенклатура", "название", "товар", "product", "name"]),
+    name: column(low, ["наименование", "название", "товар", "номенклатура", "product", "name"], "идентификатор"),
     price: column(low, ["цена", "price", "стоимость", "цпрайс", "прайс"]),
     barcode: column(low, ["штрихкод", "штрих", "barcode", "ean"]),
     code: column(low, ["код", "артикул", "sku"], "штрих"),
     unit: column(low, ["единица", "ед.", "ед ", "unit"])
   };
+}
+function headerLabels(grid, header) {
+  const top = (grid[header] || []).map(item => cell(item));
+  const next = grid[header + 1] || [];
+  const nextJoined = next.map(item => cell(item).toLowerCase()).join(" ");
+  const nameCol = column(top.map(item => item.toLowerCase()), ["товар", "наименование", "название"], "идентификатор");
+  const nextName = nameCol >= 0 ? cell(next[nameCol]) : "x";
+  if (!nextName && /цена|ед|штрих/.test(nextJoined)) return top.map((label, index) => label || cell(next[index]));
+  return top;
+}
+function usableMap(labels, saved) {
+  const guessed = guessMap(labels.map(item => item.toLowerCase()));
+  if (!saved) return guessed;
+  const nameLabel = (labels[saved.name] || "").toLowerCase();
+  if (nameLabel.includes("идентификатор")) return guessed;
+  return saved;
+}
+function looksLikeHeader(row) {
+  const joined = (row || []).map(item => cell(item).toLowerCase()).join(" ");
+  if (/\d{8,14}/.test(joined.replace(/\s/g, ""))) return false;
+  return /наимен|номенклат|товар|назван|штрих|артикул|цена|прайс/.test(joined);
+}
+function isBarcodeValue(value) {
+  const text = cell(value).replace(/\s/g, "");
+  return /^\d{8,14}$/.test(text);
+}
+function isPriceValue(value) {
+  const text = cell(value).replace(/\s/g, "").replace(",", ".");
+  if (!/^\d+(\.\d{1,2})?$/.test(text)) return false;
+  if (isBarcodeValue(text)) return false;
+  const number = Number(text);
+  return number > 0 && number < 1000000;
+}
+function isNameValue(value) {
+  const text = cell(value);
+  return /[а-яёa-z]/i.test(text) && text.length >= 4 && !isBarcodeValue(text);
+}
+function detectPlain(grid, kind) {
+  for (let index = 0; index < Math.min(grid.length, 15); index += 1) {
+    if (looksLikeHeader(grid[index])) return null;
+  }
+  const sample = [];
+  for (let index = 0; index < grid.length && sample.length < 40; index += 1) {
+    if ((grid[index] || []).some(item => cell(item))) sample.push(grid[index]);
+  }
+  if (sample.length < 2) return null;
+  const width = sample.reduce((max, row) => Math.max(max, row.length), 0);
+  const cols = [];
+  for (let index = 0; index < width; index += 1) {
+    let names = 0, bars = 0, prices = 0, filled = 0;
+    sample.forEach(row => {
+      const value = row[index];
+      if (!cell(value)) return;
+      filled += 1;
+      if (isBarcodeValue(value)) bars += 1;
+      else if (isPriceValue(value)) prices += 1;
+      else if (isNameValue(value)) names += 1;
+    });
+    cols.push({index, names, bars, prices, filled});
+  }
+  const nameCol = cols.filter(col => col.filled && col.names >= 3 && col.names >= col.filled * 0.6).sort((a, b) => b.names - a.names)[0];
+  const barCol = cols.filter(col => col.filled && col.bars >= 3 && col.bars >= col.filled * 0.6).sort((a, b) => b.bars - a.bars)[0];
+  const priceCol = cols.filter(col => col.filled && (!barCol || col.index !== barCol.index) && col.prices >= 3 && col.prices >= col.filled * 0.6).sort((a, b) => b.prices - a.prices)[0];
+  if (!nameCol) return null;
+  if (kind === "supplier" && !priceCol) return null;
+  return {header: -1, map: {name: nameCol.index, price: priceCol ? priceCol.index : -1, barcode: barCol ? barCol.index : -1, code: -1, unit: -1}};
+}
+function catalogLooksLikeIds() {
+  const sample = state.catalog.slice(0, 30);
+  if (sample.length < 5) return false;
+  const ids = sample.filter(item => /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(String(item.name).trim())).length;
+  return ids >= sample.length / 2;
 }
 function fillMapper(grid, header, map) {
   const labels = grid[header].map((item, index) => cell(item) || ("Колонка " + (index + 1)));
@@ -364,6 +561,8 @@ function applyRows(grid, header, map, file, kind) {
     state.catalog = [];
     state.links = {};
     state.methods = {};
+    state.verified = {};
+    state.draft = {};
     for (let index = header + 1; index < grid.length; index += 1) {
       const row = grid[index];
       const name = cell(row[map.name]);
@@ -375,7 +574,8 @@ function applyRows(grid, header, map, file, kind) {
       });
     }
     analyze();
-    document.getElementById("report").textContent = "Наш прайс загружен, " + state.catalog.length + " товаров. " + reportText(0);
+    save();
+    document.getElementById("report").textContent = "Наш прайс загружен, " + state.catalog.length + " товаров. " + reportText();
     renderToday();
     show("match");
     return;
@@ -390,7 +590,7 @@ function applyRows(grid, header, map, file, kind) {
     added += 1;
   }
   if (state.catalog.length) analyze();
-  document.getElementById("report").textContent = "Прайс загружен: " + added + " строк. " + (state.catalog.length ? reportText(0) : "Наш прайс ещё не загружен, связка будет после него.");
+  document.getElementById("report").textContent = "Прайс загружен: " + added + " строк. " + (state.catalog.length ? reportText() : "Наш прайс ещё не загружен, связка будет после него.");
   if (state.catalog.length) show("match");
   else renderToday();
 }
@@ -400,10 +600,16 @@ function startImport(file, kind) {
       document.getElementById("report").textContent = error;
       return;
     }
+    const plain = detectPlain(grid, kind);
+    if (plain) {
+      applyRows(grid, plain.header, plain.map, file, kind);
+      document.getElementById("mapper").classList.add("hidden");
+      return;
+    }
     const header = findHeader(grid) >= 0 ? findHeader(grid) : guessHeader(grid);
-    const labels = grid[header].map(item => cell(item));
+    const labels = headerLabels(grid, header);
     const saved = state.templates[headerKey(labels)];
-    const map = saved || guessMap(labels.map(item => item.toLowerCase()));
+    const map = usableMap(labels, saved);
     pending = {grid, header, file, kind, labels};
     const ready = map.name >= 0 && (kind === "our" || map.price >= 0);
     if (saved || ready) {
@@ -458,62 +664,187 @@ function drawPriceSearch() {
     : "<p class='muted'>Введите название, чтобы сравнить поставщиков.</p>";
 }
 document.getElementById("price-search").addEventListener("input", drawPriceSearch);
+function esc(value) {
+  return String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+}
+const STATUS_TEXT = {
+  sure: "Совпало, проверьте",
+  doubt: "Сомнение",
+  none: "Не сопоставлено",
+  confirmed: "Подтверждено",
+  picked: "Выбрано, подтвердите"
+};
+function passesFilter(item) {
+  if (matchFilter === "all") return true;
+  if (matchFilter === "sure") return item.status === "sure" || item.status === "picked";
+  return item.status === matchFilter;
+}
 function renderMatch() {
   const offers = uniqueOffers();
-  document.getElementById("auto-box").innerHTML = "<p class='ok'>Связано автоматически: " + Object.keys(state.links).length + "</p>";
-  document.getElementById("suggest-box").innerHTML = suggestions.length ? suggestions.slice(0, 30).map(item => {
+  const suppliers = [...new Set([...offers.values()].map(row => row[0]))].sort();
+  const select = document.getElementById("match-supplier");
+  if (!state.supplierPick || !suppliers.includes(state.supplierPick)) state.supplierPick = suppliers[0] || "";
+  select.innerHTML = suppliers.map(name => "<option value=\"" + esc(name) + "\"" + (name === state.supplierPick ? " selected" : "") + ">" + esc(name) + "</option>").join("");
+  const filters = [
+    ["all", "Все"],
+    ["sure", "Совпало"],
+    ["doubt", "Сомнение"],
+    ["none", "Не сопоставлено"],
+    ["confirmed", "Подтверждено"]
+  ];
+  document.getElementById("match-filters").innerHTML = filters.map(([id, label]) => "<button class='filter" + (matchFilter === id ? " active" : "") + "' type='button' data-filter='" + id + "'>" + label + "</button>").join("");
+  const query = (document.getElementById("match-search").value || "").trim().toLowerCase();
+  const visible = judged.filter(item => {
     const row = offers.get(item.key);
-    const catalog = state.catalog[item.catalogIndex];
-    return "<p><b>" + catalog.name + "</b> <span class='muted'>" + catalog.code + "</span><br>"
-      + row[1] + " <span class='muted'>" + row[0] + "</span><br><span class='warn'>" + item.reason + "</span><br>"
-      + "<button class='action yes' type='button' data-key='" + encodeURIComponent(item.key) + "' data-code='" + encodeURIComponent(catalog.code) + "'>Связать</button> "
-      + "<button class='secondary no' type='button' data-key='" + encodeURIComponent(item.key) + "' data-code='" + encodeURIComponent(catalog.code) + "'>Это не тот товар</button></p>";
-  }).join("") : "<p class='muted'>Сомнений нет.</p>";
-  document.querySelectorAll(".yes").forEach(button => button.addEventListener("click", () => {
-    const key = decodeURIComponent(button.dataset.key);
-    state.links[key] = decodeURIComponent(button.dataset.code);
-    state.methods[key] = "проверка";
-    suggestions = suggestions.filter(item => item.key !== key);
-    save(); renderMatch();
-  }));
-  document.querySelectorAll(".no").forEach(button => button.addEventListener("click", () => {
-    const key = decodeURIComponent(button.dataset.key);
-    const code = decodeURIComponent(button.dataset.code);
-    state.skip[key + "\n" + code] = true;
-    suggestions = suggestions.filter(item => item.key !== key);
-    unmatched.push(key);
-    save(); renderMatch();
-  }));
-  const select = document.getElementById("manual-catalog");
-  select.innerHTML = state.catalog.slice(0, 300).map(item => "<option value='" + encodeURIComponent(item.code) + "'>" + item.name + "</option>").join("");
-  drawMiss();
+    if (!row || row[0] !== state.supplierPick) return false;
+    if (!passesFilter(item)) return false;
+    if (query && !row[1].toLowerCase().includes(query)) return false;
+    return true;
+  });
+  const counts = tally(visible);
+  document.getElementById("match-counts").textContent = state.catalog.length
+    ? "У этого поставщика в фильтре: " + visible.length + ". Совпало: " + ((counts.sure || 0) + (counts.picked || 0)) + ". Сомнение: " + (counts.doubt || 0) + ". Не сопоставлено: " + (counts.none || 0) + ". Подтверждено: " + (counts.confirmed || 0) + "."
+      + (catalogLooksLikeIds() ? " Названия не загрузились: в справочнике коды вида 444da418-…. Откройте «Сегодня», в пункте «1. Наш прайс» ещё раз выберите файл Остатки.xls." : "")
+    : "Сначала загрузите наш прайс на вкладке «Сегодня».";
+  const slice = visible.slice(0, matchShown);
+  document.getElementById("match-body").innerHTML = slice.map(item => {
+    const row = offers.get(item.key);
+    const ours = item.code ? catalogByCode(item.code) : null;
+    const oursText = "<input class='row-search' type='text' autocomplete='off' data-key='" + encodeURIComponent(item.key) + "' value='" + esc(ours && !catalogLooksLikeIds() ? ours.name : "") + "' placeholder='чайка'>";
+    const reason = item.reason ? "<br><span class='warn'>" + esc(item.reason) + "</span>" : "";
+    const tick = item.code && !catalogLooksLikeIds()
+      ? "<label><input class='tick' type='checkbox' data-key='" + encodeURIComponent(item.key) + "' data-code='" + encodeURIComponent(item.code) + "'" + (item.status === "confirmed" ? " checked" : "") + "> Да</label>"
+        + (item.status === "confirmed" ? "" : " <button class='secondary no' type='button' data-key='" + encodeURIComponent(item.key) + "' data-code='" + encodeURIComponent(item.code) + "'>Нет</button>")
+      : "<span class='muted'>Наберите название выше</span>";
+    return "<tr class='" + (item.status === "confirmed" ? "done" : "need") + "'><td>" + esc(row[1]) + "</td><td>" + esc(row[0]) + "</td><td>" + oursText + "</td><td>"
+      + esc(STATUS_TEXT[item.status] || item.status) + reason + "</td><td>" + tick + "</td></tr>";
+  }).join("") || "<tr><td colspan='5'>В этом фильтре пусто.</td></tr>";
+  const more = document.getElementById("match-more");
+  more.classList.toggle("hidden", visible.length <= slice.length);
+  more.textContent = "Показать ещё (" + Math.max(visible.length - slice.length, 0) + ")";
 }
-function drawMiss() {
-  const offers = uniqueOffers();
-  const query = (document.getElementById("miss-search").value || "").trim().toLowerCase();
-  const list = unmatched.filter(key => !query || key.toLowerCase().includes(query)).slice(0, 30);
-  document.getElementById("miss-box").innerHTML = "<p>Не связалось: <b>" + unmatched.length + "</b>. Показаны первые " + list.length + ".</p>"
-    + list.map(key => {
-      const row = offers.get(key);
-      return "<p>" + (row ? row[1] + " <span class='muted'>" + row[0] + "</span>" : key)
-        + " <button class='action manual' type='button' data-key='" + encodeURIComponent(key) + "'>Связать</button></p>";
-    }).join("");
-  document.querySelectorAll(".manual").forEach(button => button.addEventListener("click", () => {
-    const code = decodeURIComponent(document.getElementById("manual-catalog").value || "");
-    if (!code) { alert("Сначала загрузите наш прайс."); return; }
-    const key = decodeURIComponent(button.dataset.key);
+document.getElementById("match-supplier").addEventListener("change", () => {
+  state.supplierPick = document.getElementById("match-supplier").value;
+  matchShown = 40;
+  save();
+  renderMatch();
+});
+document.getElementById("match-filters").addEventListener("click", event => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  matchFilter = button.dataset.filter;
+  matchShown = 40;
+  renderMatch();
+});
+document.getElementById("match-search").addEventListener("input", () => { matchShown = 40; renderMatch(); });
+document.getElementById("match-more").addEventListener("click", () => { matchShown += 40; renderMatch(); });
+document.getElementById("match-body").addEventListener("click", event => {
+  const button = event.target.closest("button.no");
+  if (!button) return;
+  const key = decodeURIComponent(button.dataset.key);
+  const code = decodeURIComponent(button.dataset.code || "");
+  if (code) state.skip[key + "\n" + code] = true;
+  delete state.draft[key];
+  delete state.verified[key];
+  delete state.links[key];
+  delete state.methods[key];
+  save();
+  analyze();
+  renderMatch();
+});
+document.getElementById("match-body").addEventListener("change", event => {
+  const box = event.target;
+  if (!box.classList.contains("tick")) return;
+  const key = decodeURIComponent(box.dataset.key);
+  const code = decodeURIComponent(box.dataset.code || "");
+  if (box.checked && code) {
     state.links[key] = code;
-    state.methods[key] = "вручную";
-    unmatched = unmatched.filter(item => item !== key);
-    save(); renderMatch();
-  }));
+    state.verified[key] = true;
+    state.methods[key] = "подтверждено";
+    delete state.draft[key];
+    const item = judgedByKey.get(key);
+    if (item) { item.status = "confirmed"; item.code = code; item.reason = ""; }
+  } else {
+    delete state.verified[key];
+    if (state.links[key]) state.draft[key] = state.links[key];
+    delete state.links[key];
+    delete state.methods[key];
+    const item = judgedByKey.get(key);
+    if (item && state.draft[key]) { item.status = "picked"; item.code = state.draft[key]; item.reason = "вы выбрали, осталось подтвердить"; }
+  }
+  save();
+  renderMatch();
+});
+let activeKey = "";
+function hideDrop() {
+  document.getElementById("inline-drop").classList.add("hidden");
 }
-document.getElementById("miss-search").addEventListener("input", drawMiss);
+function showDrop(field) {
+  const drop = document.getElementById("inline-drop");
+  const query = field.value.trim();
+  const parts = norm(query).split(" ").filter(Boolean);
+  const rect = field.getBoundingClientRect();
+  drop.style.top = (rect.bottom + 4) + "px";
+  drop.style.left = rect.left + "px";
+  drop.style.width = Math.max(rect.width, 380) + "px";
+  if (catalogLooksLikeIds()) {
+    drop.innerHTML = "<p class='warn'>«" + esc(query) + "» не находится: в справочник попали коды, а не названия. Откройте «Сегодня» и в пункте «1. Наш прайс» ещё раз выберите Остатки.xls.</p>";
+    drop.classList.remove("hidden");
+    return;
+  }
+  if (!parts.length || parts.join("").length < 3) { hideDrop(); return; }
+  if (!state.catalog.length) {
+    drop.innerHTML = "<p class='warn'>Справочник пуст. Загрузите наш прайс.</p>";
+    drop.classList.remove("hidden");
+    return;
+  }
+  const found = state.catalog.filter(item => {
+    const blob = (item.name + " " + item.code + " " + (item.barcode || "")).toLowerCase();
+    return parts.every(part => blob.includes(part));
+  });
+  const slice = found.slice(0, 30);
+  drop.innerHTML = found.length
+    ? "<p class='muted'>Найдено " + found.length + (found.length > slice.length ? ", показаны первые " + slice.length : "") + ".</p>"
+      + slice.map(item => "<button class='quiet choose' type='button' data-code='" + encodeURIComponent(item.code) + "'>" + esc(item.name) + " <span class='muted'>" + esc(item.code) + "</span></button>").join("")
+    : "<p class='muted'>В справочнике нет «" + esc(query) + "».</p>";
+  drop.classList.remove("hidden");
+}
+document.getElementById("match-body").addEventListener("input", event => {
+  const field = event.target.closest("input.row-search");
+  if (!field) return;
+  activeKey = decodeURIComponent(field.dataset.key);
+  showDrop(field);
+});
+document.getElementById("match-body").addEventListener("focusin", event => {
+  const field = event.target.closest("input.row-search");
+  if (!field) return;
+  activeKey = decodeURIComponent(field.dataset.key);
+  showDrop(field);
+});
+document.getElementById("inline-drop").addEventListener("mousedown", event => {
+  const button = event.target.closest("button.choose");
+  if (!button || !activeKey) return;
+  event.preventDefault();
+  const code = decodeURIComponent(button.dataset.code);
+  delete state.verified[activeKey];
+  delete state.links[activeKey];
+  state.draft[activeKey] = code;
+  state.methods[activeKey] = "выбрано";
+  const item = judgedByKey.get(activeKey);
+  if (item) { item.status = "picked"; item.code = code; item.reason = "вы выбрали, осталось подтвердить"; }
+  save();
+  hideDrop();
+  renderMatch();
+});
+document.addEventListener("mousedown", event => {
+  if (event.target.closest("#inline-drop") || event.target.closest("input.row-search")) return;
+  hideDrop();
+});
 function renderOrder() {
   const box = document.getElementById("order-body");
-  const codes = [...new Set(Object.values(state.links))];
+  const codes = [...new Set(Object.keys(state.verified).filter(key => state.verified[key] && state.links[key]).map(key => state.links[key]))];
   if (!codes.length) {
-    box.innerHTML = "<div class='card'><button class='action' disabled>Собрать заказ</button><p class='warn'>Сначала свяжите товары.</p></div>";
+    box.innerHTML = "<div class='card'><button class='action' disabled>Собрать заказ</button><p class='warn'>Сначала подтвердите строки галочкой на вкладке «Номенклатура».</p></div>";
     return;
   }
   const catalog = new Map(state.catalog.map(item => [item.code, item]));
@@ -521,7 +852,7 @@ function renderOrder() {
   const day = today();
   box.innerHTML = codes.slice(0, 80).map(code => {
     const item = catalog.get(code) || {name: code, unit: ""};
-    const group = [...offers.values()].filter(row => state.links[offerKey(row)] === code);
+    const group = [...offers.values()].filter(row => state.verified[offerKey(row)] && state.links[offerKey(row)] === code);
     const problem = group.find(row => unitProblem(item.unit, row[4]));
     if (problem && group.some(row => normUnit(row[4]) && normUnit(item.unit) && normUnit(row[4]) !== normUnit(item.unit))) {
       return "<div class='card'><p><b>" + item.name + "</b></p><p class='warn'>единица не совпала</p></div>";
@@ -550,6 +881,7 @@ function renderOrder() {
     save(); renderOrder();
   }));
 }
+save();
 if (state.catalog.length) analyze();
 renderToday();
 </script>
