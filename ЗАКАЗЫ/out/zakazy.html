@@ -197,8 +197,11 @@ if (!state.migratedV4) {
   state.migratedV4 = true;
   save();
 }
-function save() {
-  const payload = {
+const WORKSPACE_API = "http://127.0.0.1:8765/api/workspace";
+let hydrated = false;
+let pushTimer = 0;
+function workspacePayload() {
+  return {
     catalog: state.catalog, links: state.links, methods: state.methods,
     skip: state.skip, absent: state.absent, confirmed: state.confirmed, templates: state.templates,
     verified: state.verified, draft: state.draft, cleared: state.cleared,
@@ -207,6 +210,16 @@ function save() {
     migratedV3: state.migratedV3, migratedV4: state.migratedV4, migratedV5: state.migratedV5, seenReady: state.seenReady,
     supplierPick: state.supplierPick || ""
   };
+}
+function workspaceWeight(data) {
+  if (!data) return 0;
+  return (data.catalog || []).length * 1000000
+    + Object.keys(data.bonds || {}).length * 1000
+    + Object.keys(data.missing || {}).length * 10
+    + (data.uploads || []).length
+    + (data.inbox || []).length;
+}
+function rememberLocal(payload) {
   try {
     localStorage.setItem(KEY, JSON.stringify(payload));
   } catch (error) {
@@ -214,6 +227,54 @@ function save() {
     try { localStorage.setItem(KEY, JSON.stringify(payload)); } catch (again) { /* связи важнее копий прайсов */ }
   }
 }
+function sendWorkspace(payload) {
+  fetch(WORKSPACE_API, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+    keepalive: true
+  }).catch(() => {});
+}
+function save() {
+  const payload = workspacePayload();
+  rememberLocal(payload);
+  if (!hydrated) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => sendWorkspace(workspacePayload()), 250);
+}
+function applyWorkspace(data) {
+  ["catalog", "links", "methods", "skip", "absent", "confirmed", "templates", "verified", "draft", "cleared", "bonds", "missing", "seen", "fresh", "inbox", "uploads", "supplierPick", "migratedV3", "migratedV4", "migratedV5", "seenReady"].forEach(key => {
+    if (data[key] !== undefined) state[key] = data[key];
+  });
+}
+function absorbUploads() {
+  (state.uploads || []).forEach(pack => {
+    if (!pack || !pack.rows || rows.some(row => row[8] === pack.file)) return;
+    pack.rows.forEach(row => rows.push(row));
+  });
+}
+async function boot() {
+  let remote = null;
+  try {
+    const response = await fetch(WORKSPACE_API, {cache: "no-store"});
+    if (response.ok) remote = await response.json();
+  } catch (error) { /* файл открыт без запущенной программы */ }
+  const localPayload = workspacePayload();
+  if (workspaceWeight(remote) > workspaceWeight(localPayload)) {
+    applyWorkspace(remote);
+    rememberLocal(workspacePayload());
+  }
+  absorbUploads();
+  if (!state.seenReady) {
+    rows.forEach(row => { state.seen[row[0] + "\n" + stableId(row)] = 1; });
+    state.seenReady = true;
+  }
+  hydrated = true;
+  save();
+  sendWorkspace(workspacePayload());
+  renderToday();
+}
+window.addEventListener("beforeunload", () => { if (hydrated) sendWorkspace(workspacePayload()); });
 function bondRecord(catalogCode, row) {
   return {catalogCode: catalogCode, nameNorm: norm(row[1]), barcode: barcode(row[3]), supplierCode: cell(row[2]), at: today(), who: ""};
 }
@@ -686,7 +747,8 @@ function renderCatalogCard() {
   const replace = document.getElementById("replace-catalog");
   if (!state.catalog.length) {
     catalogReplaceOpen = false;
-    status.innerHTML = "<p class='warn'>Список пуст. Выберите файл номенклатуры из 1С: код, наименование, единица.</p>";
+    status.innerHTML = "<p class='warn'>Список пуст. Выберите файл номенклатуры из 1С: код, наименование, единица.</p>"
+      + "<p class='muted'>Если товары уже видны при открытии файла zakazy.html, откройте этот файл один раз, пока программа запущена. Они перенесутся сами.</p>";
     wrap.classList.remove("hidden");
     replace.classList.add("hidden");
     return;
@@ -1488,16 +1550,7 @@ function renderOrder() {
     save(); renderOrder();
   }));
 }
-(state.uploads || []).forEach(pack => {
-  if (!pack || !pack.rows || rows.some(row => row[8] === pack.file)) return;
-  pack.rows.forEach(row => rows.push(row));
-});
-if (!state.seenReady) {
-  rows.forEach(row => { state.seen[row[0] + "\n" + stableId(row)] = 1; });
-  state.seenReady = true;
-}
-save();
-renderToday();
+boot();
 </script>
 </body>
 </html>

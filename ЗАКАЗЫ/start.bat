@@ -6,6 +6,5 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-start "" "http://127.0.0.1:8765/zakazy.html"
-"C:\Users\1\AppData\Local\Programs\Python\Python312\python.exe" -m http.server 8765 --bind 127.0.0.1
+"C:\Users\1\AppData\Local\Programs\Python\Python312\python.exe" "%~dp0src\serve.py"
 pause
