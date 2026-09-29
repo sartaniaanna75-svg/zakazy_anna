@@ -9,7 +9,6 @@ PRICES = ROOT / "data" / "prices.json"
 XLSX_LIB = ROOT / "out" / "xlsx.full.min.js"
 TARGETS = [
     ROOT / "zakazy.html",
-    Path(r"C:\Users\1\Desktop\zakazy.html"),
     ROOT / "out" / "zakazy.html",
 ]
 
