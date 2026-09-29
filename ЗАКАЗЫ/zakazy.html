@@ -140,6 +140,7 @@ let wordIndex = new Map();
 const STOP = new Set("для или при под без шт штук упак упаковка набор все это про над".split(" "));
 let matchFilter = "all";
 let matchShown = 40;
+let lastRead = "";
 const HUMAN = {вручную: 1, проверка: 1, подтверждено: 1};
 if (!state.migratedV3) {
   Object.keys(state.links).forEach(key => {
@@ -512,14 +513,26 @@ function guessHeader(grid) {
   }
   return best;
 }
+function pickColumn(labels, needles, reject) {
+  const skip = reject || [];
+  for (let needleIndex = 0; needleIndex < needles.length; needleIndex += 1) {
+    const needle = needles[needleIndex];
+    for (let index = 0; index < labels.length; index += 1) {
+      const label = String(labels[index] || "").replace(/\s+/g, " ");
+      if (skip.some(word => label.includes(word))) continue;
+      if (label.includes(needle)) return index;
+    }
+  }
+  return -1;
+}
 function guessMap(labels) {
   const low = labels.map(item => cell(item).toLowerCase());
   return {
-    name: column(low, ["наименование", "название", "товар", "номенклатура", "product", "name"], "идентификатор"),
-    price: column(low, ["цена", "price", "стоимость", "цпрайс", "прайс"]),
-    barcode: column(low, ["штрихкод", "штрих", "barcode", "ean"]),
-    code: column(low, ["код", "артикул", "sku"], "штрих"),
-    unit: column(low, ["единица", "ед.", "ед ", "unit"])
+    name: pickColumn(low, ["наименование", "название", "product", "name", "номенклатура", "товар"], ["идентификатор", "штрих", "шк", "группа", "подгруппа", "марка", "код"]),
+    price: pickColumn(low, ["цена", "price", "стоимость"], ["ндс"]),
+    barcode: pickColumn(low, ["штрихкод", "штрих", "шк", "barcode", "ean"], []),
+    code: pickColumn(low, ["артикул", "sku", "код"], ["штрих", "шк"]),
+    unit: pickColumn(low, ["единица", "ед.", "ед ", "unit"], [])
   };
 }
 function headerLabels(grid, header) {
@@ -534,8 +547,9 @@ function headerLabels(grid, header) {
 function usableMap(labels, saved) {
   const guessed = guessMap(labels.map(item => item.toLowerCase()));
   if (!saved) return guessed;
-  const nameLabel = (labels[saved.name] || "").toLowerCase();
+  const nameLabel = (labels[saved.name] || "").toLowerCase().replace(/\s+/g, " ");
   if (nameLabel.includes("идентификатор")) return guessed;
+  if (nameLabel.includes("код") && !nameLabel.includes("наимен")) return guessed;
   return saved;
 }
 function looksLikeHeader(row) {
@@ -588,6 +602,85 @@ function detectPlain(grid, kind) {
   if (kind === "supplier" && !priceCol) return null;
   return {header: -1, map: {name: nameCol.index, price: priceCol ? priceCol.index : -1, barcode: barCol ? barCol.index : -1, code: -1, unit: -1}};
 }
+function sampleValues(grid, header, col) {
+  const start = header < 0 ? 0 : header + 1;
+  const values = [];
+  for (let index = start; index < grid.length && values.length < 24; index += 1) {
+    const value = cell((grid[index] || [])[col]);
+    if (value) values.push(value);
+  }
+  return values;
+}
+function looksLikeCode(value) {
+  return /^\d{4,14}$/.test(cell(value).replace(/\s/g, ""));
+}
+function nameColumnOk(values) {
+  if (values.length < 3) return false;
+  const words = values.filter(isNameValue).length;
+  const codes = values.filter(looksLikeCode).length;
+  return words >= values.length * 0.6 && codes < values.length * 0.5;
+}
+function priceColumnOk(values) {
+  if (values.length < 3) return false;
+  const prices = values.map(value => {
+    const text = cell(value).replace(/\s/g, "").replace(",", ".");
+    return isPriceValue(text) ? Number(text) : null;
+  }).filter(value => value != null);
+  if (prices.length < values.length * 0.4) return false;
+  const tiny = prices.filter(value => value < 1).length;
+  return tiny < prices.length * 0.8;
+}
+function barcodeColumnOk(values) {
+  if (values.length < 3) return false;
+  return values.filter(isBarcodeValue).length >= values.length * 0.6;
+}
+function gridWidth(grid) {
+  return grid.reduce((max, row) => Math.max(max, (row || []).length), 0);
+}
+function bestNameColumn(grid, header) {
+  let best = -1;
+  let bestScore = 0;
+  for (let index = 0; index < gridWidth(grid); index += 1) {
+    const values = sampleValues(grid, header, index);
+    const words = values.filter(isNameValue).length;
+    if (!nameColumnOk(values) || words <= bestScore) continue;
+    bestScore = words;
+    best = index;
+  }
+  return best;
+}
+function bestPriceColumn(grid, header, avoid) {
+  let best = -1;
+  let bestScore = 0;
+  for (let index = 0; index < gridWidth(grid); index += 1) {
+    if (avoid.indexOf(index) >= 0) continue;
+    const values = sampleValues(grid, header, index);
+    if (!priceColumnOk(values)) continue;
+    const prices = values.filter(isPriceValue).length;
+    if (prices <= bestScore) continue;
+    bestScore = prices;
+    best = index;
+  }
+  return best;
+}
+function repairMap(grid, header, map, kind) {
+  const copy = {name: map.name, price: map.price, barcode: map.barcode, code: map.code, unit: map.unit};
+  if (!nameColumnOk(sampleValues(grid, header, copy.name))) {
+    const better = bestNameColumn(grid, header);
+    if (better >= 0) copy.name = better;
+  }
+  if (copy.barcode >= 0 && !barcodeColumnOk(sampleValues(grid, header, copy.barcode))) copy.barcode = -1;
+  if (kind === "supplier" && !priceColumnOk(sampleValues(grid, header, copy.price))) {
+    const better = bestPriceColumn(grid, header, [copy.barcode]);
+    if (better >= 0) copy.price = better;
+  }
+  return copy;
+}
+function layoutOk(grid, header, map, kind) {
+  if (!nameColumnOk(sampleValues(grid, header, map.name))) return false;
+  if (kind === "supplier" && !priceColumnOk(sampleValues(grid, header, map.price))) return false;
+  return true;
+}
 function catalogLooksLikeIds() {
   const sample = state.catalog.slice(0, 30);
   if (sample.length < 5) return false;
@@ -638,12 +731,17 @@ function applyRows(grid, header, map, file, kind) {
     }
     analyze();
     save();
-    document.getElementById("report").textContent = "Наш прайс загружен, " + state.catalog.length + " товаров. " + reportText();
+    const examples = state.catalog.slice(0, 3).map(item => item.name).join(" · ");
+    lastRead = examples ? "Пример: " + examples : "";
+    document.getElementById("report").textContent = "Наш прайс загружен, " + state.catalog.length + " товаров. " + lastRead + " " + reportText();
     renderToday();
     show("match");
     return;
   }
   let added = 0;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index][8] === file.name) rows.splice(index, 1);
+  }
   for (let index = header + 1; index < grid.length; index += 1) {
     const row = grid[index];
     const name = cell(row[map.name]);
@@ -653,7 +751,9 @@ function applyRows(grid, header, map, file, kind) {
     added += 1;
   }
   if (state.catalog.length) analyze();
-  document.getElementById("report").textContent = "Прайс загружен: " + added + " строк. " + (state.catalog.length ? reportText() : "Наш прайс ещё не загружен, связка будет после него.");
+  const examples = rows.slice(Math.max(rows.length - added, 0), Math.max(rows.length - added, 0) + 3).map(row => row[1]).join(" · ");
+  lastRead = examples ? "Пример: " + examples : "";
+  document.getElementById("report").textContent = "Прайс загружен: " + added + " строк. " + lastRead + " " + (state.catalog.length ? reportText() : "Наш прайс ещё не загружен, связка будет после него.");
   if (state.catalog.length) show("match");
   else renderToday();
 }
@@ -665,23 +765,25 @@ function startImport(file, kind) {
     }
     const plain = detectPlain(grid, kind);
     if (plain) {
-      applyRows(grid, plain.header, plain.map, file, kind);
-      document.getElementById("mapper").classList.add("hidden");
-      return;
+      const map = repairMap(grid, plain.header, plain.map, kind);
+      if (layoutOk(grid, plain.header, map, kind)) {
+        applyRows(grid, plain.header, map, file, kind);
+        document.getElementById("mapper").classList.add("hidden");
+        return;
+      }
     }
     const header = findHeader(grid) >= 0 ? findHeader(grid) : guessHeader(grid);
     const labels = headerLabels(grid, header);
     const saved = state.templates[headerKey(labels)];
-    const map = usableMap(labels, saved);
+    const map = repairMap(grid, header, usableMap(labels, saved), kind);
     pending = {grid, header, file, kind, labels};
-    const ready = map.name >= 0 && (kind === "our" || map.price >= 0);
-    if (saved || ready) {
+    if (layoutOk(grid, header, map, kind)) {
       applyRows(grid, header, map, file, kind);
       document.getElementById("mapper").classList.add("hidden");
       return;
     }
     fillMapper(grid, header, map);
-    document.getElementById("report").textContent = "Формат незнакомый. Укажите, где название" + (kind === "supplier" ? " и цена" : "") + ", и нажмите «Загрузить так».";
+    document.getElementById("report").textContent = "Не получилось уверенно прочитать колонки. Проверьте, где название" + (kind === "supplier" ? " и цена" : "") + ". Ниже первые строки файла.";
   });
 }
 document.getElementById("header-row").addEventListener("change", () => {
@@ -766,7 +868,7 @@ function renderMatch() {
   });
   const counts = tally(visible);
   document.getElementById("match-counts").textContent = state.catalog.length
-    ? "У этого поставщика в фильтре: " + visible.length + ". Совпало: " + (counts.sure || 0) + ". Сомнение: " + (counts.doubt || 0) + ". Не сопоставлено: " + (counts.none || 0) + ". Подтверждено: " + ((counts.confirmed || 0) + (counts.picked || 0)) + "."
+    ? (lastRead ? lastRead + " " : "") + "У этого поставщика в фильтре: " + visible.length + ". Совпало: " + (counts.sure || 0) + ". Сомнение: " + (counts.doubt || 0) + ". Не сопоставлено: " + (counts.none || 0) + ". Подтверждено: " + ((counts.confirmed || 0) + (counts.picked || 0)) + "."
       + (catalogLooksLikeIds() ? " Названия не загрузились: в справочнике коды вида 444da418-…. Откройте «Сегодня», в пункте «1. Наш прайс» ещё раз выберите файл Остатки.xls." : "")
     : "Сначала загрузите наш прайс на вкладке «Сегодня».";
   const slice = visible.slice(0, matchShown);
