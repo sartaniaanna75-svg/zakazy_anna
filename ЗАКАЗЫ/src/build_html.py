@@ -196,6 +196,9 @@ let matchShown = 40;
 let priceShown = 40;
 let lastRead = "";
 const HUMAN = {вручную: 1, проверка: 1, подтверждено: 1};
+const WORKSPACE_API = "http://127.0.0.1:8765/api/workspace";
+let hydrated = false;
+let pushTimer = 0;
 if (!state.migratedV3) {
   Object.keys(state.links).forEach(key => {
     if (HUMAN[state.methods[key]]) state.verified[key] = true;
@@ -211,9 +214,6 @@ if (!state.migratedV4) {
   state.migratedV4 = true;
   save();
 }
-const WORKSPACE_API = "http://127.0.0.1:8765/api/workspace";
-let hydrated = false;
-let pushTimer = 0;
 function workspacePayload() {
   return {
     catalog: state.catalog, links: state.links, methods: state.methods,
