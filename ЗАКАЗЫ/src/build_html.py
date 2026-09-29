@@ -245,11 +245,21 @@ const MEASURE_WORDS = new Set("кг гр мл литр литра литров �
 function sigTokens(value) {
   return tokens(value).filter(token => token.length >= 3 && !STOP.has(token) && !MEASURE_WORDS.has(token) && !/^\d/.test(token));
 }
+const SHORT_STEM = new Set("пос пор кон сти бел дет жид гел".split(" "));
 function tokenFits(left, right) {
   if (left === right) return true;
   const short = left.length <= right.length ? left : right;
   const long = left.length <= right.length ? right : left;
-  return short.length >= 4 && long.startsWith(short) && long.length - short.length <= 3;
+  if (!long.startsWith(short)) return false;
+  const extra = long.length - short.length;
+  if (short.length >= 4 && extra <= 3) return true;
+  return short.length === 3 && SHORT_STEM.has(short) && extra <= 5;
+}
+function indexKeys(token) {
+  const keys = [token];
+  if (token.length > 4) keys.push(token.slice(0, 4));
+  if (token.length >= 5 && SHORT_STEM.has(token.slice(0, 3))) keys.push(token.slice(0, 3));
+  return keys;
 }
 function nameScore(left, right) {
   const offer = sigTokens(left);
@@ -258,11 +268,6 @@ function nameScore(left, right) {
   let hit = 0;
   offer.forEach(token => { if (ours.some(item => tokenFits(token, item))) hit += 1; });
   return hit / offer.length;
-}
-function indexKeys(token) {
-  const keys = [token];
-  if (token.length > 4) keys.push(token.slice(0, 4));
-  return keys;
 }
 function seedWord(name) {
   const words = tokens(name).filter(token => token.length >= 4 && !STOP.has(token) && !/^\d/.test(token));
